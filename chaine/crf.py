@@ -1,30 +1,25 @@
 """
-chaine.api
+chaine.crf
 ~~~~~~~~~~
 
-This module implements the high-level API to train a conditional random field.
+This module implements the trainer and model.
 """
 
-from chaine.crf import Model, Trainer
-from chaine.typing import Filepath, Iterable, Labels, Sequence
+import json
+
+from chaine.core.crf import Model as _Model
+from chaine.core.crf import Trainer as _Trainer
+from chaine.logging import Logger
+from chaine.typing import Dict, Filepath, Iterable, Labels, List, Sequence, Union
+
+LOGGER = Logger(__name__)
 
 
-def train(
-    dataset: Iterable[Sequence],
-    labels: Iterable[Labels],
-    model_filepath: Filepath = "model.crf",
-    **kwargs,
-) -> Model:
-    """Train a conditional random field.
+class Trainer(_Trainer):
+    """Trainer for conditional random fields.
 
     Parameters
     ----------
-    dataset : Iterable[Sequence]
-        Data set consisting of sequences of feature sets.
-    labels : Iterable[Labels]
-        Labels corresponding to each instance in the data set.
-    model_filepath : Filepath, optional (default=model.crf)
-        Path to model location.
     algorithm : str
         The following optimization algorithms are available:
             * lbfgs: Limited-memory BFGS with L1/L2 regularization
@@ -143,15 +138,149 @@ def train(
         Initial variance of every feature weight.
     gamma : float, optional (default=1)
         Trade-off between loss function and changes of feature weights.
-
-    Returns
-    -------
-    Model
-        A conditional random field trained on the dataset.
     """
-    # initialize trainer and start training
-    trainer = Trainer(**kwargs)
-    trainer.train(dataset, labels, model_filepath=str(model_filepath))
+    def __init__(self, algorithm: str = "l2sgd", **kwargs):
+        self.algorithm = algorithm
+        super().__init__(algorithm, **kwargs)
 
-    # load and return the trained model
-    return Model(model_filepath)
+    def __repr__(self):
+        return f"<Trainer ({self.algorithm}): {self.params}>"
+
+    def train(
+        self,
+        dataset: Iterable[Sequence],
+        labels: Iterable[Labels],
+        model_filepath: Filepath,
+    ):
+        """Start training on the given data set.
+
+        Parameters
+        ----------
+        dataset : Iterable[Sequence]
+            Data set consisting of sequences of feature sets.
+        labels : Iterable[Labels]
+            Labels corresponding to each instance in the data set.
+        model_filepath : Filepath, optional (default=model.crf)
+            Path to model location.
+        """
+        LOGGER.info("Loading training data")
+        for i, (sequence, labels_) in enumerate(zip(dataset, labels)):
+            # log progress every 100 data points
+            if i > 0 and i % 100 == 0:
+                LOGGER.debug(f"{i} processed data points")
+
+            try:
+                self._append(sequence, labels_)
+            except Exception as message:
+                LOGGER.error(message)
+                LOGGER.debug(f"Sequence: {json.dumps(sequence)}")
+                LOGGER.debug(f"Labels: {json.dumps(labels_)}")
+
+        # fire!
+        self._train(model_filepath)
+
+    @property
+    def params(self) -> dict[str, Union[str, int, float, bool]]:
+        """Set parameters of the trainer.
+
+        Returns
+        -------
+        dict[str, Union[str, int, float, bool]]
+            Parameters of the trainer.
+        """
+        return {
+            self._param2kwarg.get(name, name): self._get_param(name)
+            for name in self._params
+        }
+
+    def _log(self, message: str):
+        """This method is used from the Cython class.
+
+        Parameters
+        ----------
+        message : str
+            Message to log.
+        """
+        LOGGER.info(message)
+
+
+class Model(_Model):
+    """Linear-chain conditional random field.
+
+    Parameters
+    ----------
+    model_filepath : Filepath
+        Path to the trained model.
+    """
+
+    def __repr__(self):
+        return f"<Model: {self.labels}>"
+
+    @property
+    def labels(self) -> set[str]:
+        """Labels the model is trained on."""
+        return set(self._labels)
+
+    def predict_single(self, sequence: Sequence) -> List[str]:
+        """Predict most likely labels for a given sequence of tokens.
+
+        Parameters
+        ----------
+        sequence : Sequence
+            Sequence of tokens represented as feature dictionaries.
+
+        Returns
+        -------
+        List[str]
+            Most likely label sequence.
+        """
+        return self._predict_single(sequence)
+
+    def predict(self, sequences: Iterable[Sequence]) -> List[List[str]]:
+        """Predict most likely labels for a batch of tokens
+
+        Parameters
+        ----------
+        sequences : Iterable[Sequence]
+            Batch of sequences of tokens represented as feature dictionaries.
+
+        Returns
+        -------
+        List[List[str]]
+            Most likely label sequences.
+        """
+        return [self.predict_single(sequence) for sequence in sequences]
+
+    def predict_proba_single(self, sequence: Sequence) -> List[Dict[str, float]]:
+        """Predict probabilities over all labels for each token in a sequence.
+
+        Parameters
+        ----------
+        sequence : Sequence
+            Sequence of tokens represented as feature dictionaries.
+
+        Returns
+        -------
+        List[Dict[str, float]]
+            Probability distributions over all labels for each token.
+        """
+        if not isinstance(sequence, list):
+            sequence = list(sequence)
+        return self._predict_proba_single(sequence)
+
+    def predict_proba(
+        self, sequences: Iterable[Sequence]
+    ) -> List[List[Dict[str, float]]]:
+        """Predict probabilities over all labels for each token in a batch of sequences.
+
+        Parameters
+        ----------
+        sequences : Sequence
+            Batch of sequences of tokens represented as feature dictionaries.
+
+        Returns
+        -------
+        List[Dict[str, float]]
+            Probability distributions over all labels for each token in the sequences.
+        """
+        return [self.predict_proba_single(sequence) for sequence in sequences]
